@@ -464,6 +464,19 @@ static Aml *build_vmbus_device_aml(VMBusBridge *vmbus_bridge)
 
     crs = aml_resource_template();
     aml_append(crs, aml_irq_no_flags(vmbus_bridge->irq));
+    /*
+     * MMIO window for guest-side vmbus_allocate_mmio() users such as
+     * the Linux hyperv_drm/hyperv_fb framebuffer drivers.  Hyper-V
+     * advertises such ranges unconditionally; hv-synthvid backs this
+     * one with RAM when present.
+     */
+    aml_append(crs, aml_qword_memory(AML_POS_DECODE, AML_MIN_FIXED,
+                                     AML_MAX_FIXED, AML_NON_CACHEABLE,
+                                     AML_READ_WRITE,
+                                     0, VMBUS_MMIO_WINDOW_BASE,
+                                     VMBUS_MMIO_WINDOW_BASE +
+                                     VMBUS_MMIO_WINDOW_SIZE - 1,
+                                     0, VMBUS_MMIO_WINDOW_SIZE));
     aml_append(dev, aml_name_decl("_CRS", crs));
 
     return dev;

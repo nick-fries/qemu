@@ -15,6 +15,12 @@
  * (SITUATION_UPDATE) and then either sends dirty rectangles (DIRT) or
  * relies on host polling.  The host merely scans out the guest memory.
  *
+ * Windows (hypervideo.sys) places the VRAM in plain guest RAM.  Linux
+ * (hyperv_drm/hyperv_fb) instead allocates it from the VMBus MMIO
+ * window advertised in the VMBS ACPI _CRS, so the device statically
+ * maps a RAM region at that window (VMBUS_MMIO_WINDOW_BASE); either
+ * kind of GPA then resolves through the same dma_memory_map() path.
+ *
  * Copyright (c) 2026 Nick Fries
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -29,6 +35,8 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/display/edid.h"
 #include "hw/hyperv/vmbus.h"
+#include "hw/hyperv/vmbus-bridge.h"
+#include "system/address-spaces.h"
 #include "ui/console.h"
 #include "trace.h"
 
@@ -282,6 +290,9 @@ struct HvSynthVid {
     qemu_edid_info edid_info;
     uint8_t edid[SYNTHVID_EDID_BLOCK_SIZE];
     Error *migration_blocker;
+
+    /* RAM backing for the VMBus MMIO window (Linux VRAM path) */
+    MemoryRegion mmio_vram;
 
     /* Negotiated protocol version, 0 when not negotiated */
     uint32_t version;
@@ -1129,6 +1140,22 @@ static void synthvid_vmdev_realize(VMBusDevice *vdev, Error **errp)
         return;
     }
 
+    /*
+     * Back the VMBus MMIO window with RAM so a VRAM_LOCATION GPA
+     * inside it (Linux hyperv_drm/hyperv_fb via vmbus_allocate_mmio())
+     * is mappable like plain guest RAM.  The window sits in the 32-bit
+     * PCI hole; RAM (priority 0) shadows the PCI address space alias
+     * (priority -1), the same way low RAM already beats the hole.
+     */
+    QEMU_BUILD_BUG_ON(SYNTHVID_VRAM_SIZE != VMBUS_MMIO_WINDOW_SIZE);
+    if (!memory_region_init_ram(&s->mmio_vram, OBJECT(vdev),
+                                "hv-synthvid.vram", SYNTHVID_VRAM_SIZE,
+                                errp)) {
+        return;
+    }
+    memory_region_add_subregion(get_system_memory(),
+                                VMBUS_MMIO_WINDOW_BASE, &s->mmio_vram);
+
     qemu_edid_generate(s->edid, sizeof(s->edid), &s->edid_info);
 
     s->con = graphic_console_init(DEVICE(vdev), 0, &synthvid_gfx_ops, s);
@@ -1139,6 +1166,7 @@ static void synthvid_vmdev_unrealize(VMBusDevice *vdev)
     HvSynthVid *s = HV_SYNTHVID(vdev);
 
     synthvid_disconnect(s);
+    memory_region_del_subregion(get_system_memory(), &s->mmio_vram);
     migrate_del_blocker(&s->migration_blocker);
     /* Graphic consoles cannot be destroyed; the device is not hotpluggable */
 }
