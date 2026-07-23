@@ -34,6 +34,7 @@
 #include "migration/blocker.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/display/edid.h"
+#include "hw/hyperv/hvgdk_mini.h"
 #include "hw/hyperv/vmbus.h"
 #include "hw/hyperv/vmbus-bridge.h"
 #include "system/address-spaces.h"
@@ -291,8 +292,14 @@ struct HvSynthVid {
     uint8_t edid[SYNTHVID_EDID_BLOCK_SIZE];
     Error *migration_blocker;
 
-    /* RAM backing for the VMBus MMIO window (Linux VRAM path) */
+    /*
+     * RAM backing for the guest-visible VRAM aperture.  Mapped at the
+     * VMBus MMIO window by default (Linux VRAM path) and relocated to
+     * the guest-chosen GPA when that lands in unbacked address space
+     * (Windows VRAM path, see synthvid_relocate_vram()).
+     */
     MemoryRegion mmio_vram;
+    uint64_t mmio_vram_base;
 
     /* Negotiated protocol version, 0 when not negotiated */
     uint32_t version;
@@ -586,6 +593,31 @@ synthvid_handle_version_request(HvSynthVid *s, VMBusChannel *chan,
     }
 }
 
+/*
+ * Move the VRAM RAM region to a guest-chosen GPA that is not otherwise
+ * backed.
+ *
+ * Windows' hypervideo.sys does not allocate VRAM from the VMBus _CRS
+ * MMIO pool.  On Hyper-V it inherits the firmware (POST) framebuffer,
+ * which the host happens to have placed inside the reserved window; a
+ * QEMU machine has no synthvid POST framebuffer, so the driver asks
+ * the root PnP arbiter for any free MMIO range (observed: 0xfe400000,
+ * the top of the free hole below the IOAPIC) and reports that in
+ * VRAM_LOCATION.  The Hyper-V host maps VRAM at whatever GPA the
+ * guest names; mirror that by relocating our backing RAM there.
+ */
+static void synthvid_relocate_vram(HvSynthVid *s, uint64_t gpa)
+{
+    MemoryRegion *sysmem = get_system_memory();
+
+    trace_hv_synthvid_vram_relocate(s->mmio_vram_base, gpa);
+    memory_region_transaction_begin();
+    memory_region_del_subregion(sysmem, &s->mmio_vram);
+    memory_region_add_subregion(sysmem, gpa, &s->mmio_vram);
+    memory_region_transaction_commit();
+    s->mmio_vram_base = gpa;
+}
+
 static void
 synthvid_handle_vram_location(HvSynthVid *s, VMBusChannel *chan,
                               const struct synthvid_vram_location *loc)
@@ -606,12 +638,26 @@ synthvid_handle_vram_location(HvSynthVid *s, VMBusChannel *chan,
 
         /*
          * Map the full VRAM window; the GPA may be plain guest RAM
-         * (hyperv_fb Gen1 CMA path) or a VMBus MMIO-window address.
-         * Only a contiguous, full-length direct mapping is usable for
-         * scanout.
+         * (hyperv_fb Gen1 CMA path), a VMBus MMIO-window address, or
+         * an arbitrary free MMIO range (Windows).  Only a contiguous,
+         * full-length direct mapping is usable for scanout.
          */
         ptr = dma_memory_map(vdev->dma_as, loc->vram_gpa, &len,
                              DMA_DIRECTION_TO_DEVICE, MEMTXATTRS_UNSPECIFIED);
+        if ((!ptr || len != SYNTHVID_VRAM_SIZE) &&
+            QEMU_IS_ALIGNED(loc->vram_gpa, HV_HYP_PAGE_SIZE) &&
+            loc->vram_gpa != s->mmio_vram_base) {
+            /* Unbacked GPA: back it with the VRAM region and retry */
+            if (ptr) {
+                dma_memory_unmap(vdev->dma_as, ptr, len,
+                                 DMA_DIRECTION_TO_DEVICE, 0);
+            }
+            synthvid_relocate_vram(s, loc->vram_gpa);
+            len = SYNTHVID_VRAM_SIZE;
+            ptr = dma_memory_map(vdev->dma_as, loc->vram_gpa, &len,
+                                 DMA_DIRECTION_TO_DEVICE,
+                                 MEMTXATTRS_UNSPECIFIED);
+        }
         if (!ptr || len != SYNTHVID_VRAM_SIZE) {
             trace_hv_synthvid_vram_map_failed(loc->vram_gpa,
                                               ptr ? (uint64_t)len : 0);
@@ -1155,6 +1201,7 @@ static void synthvid_vmdev_realize(VMBusDevice *vdev, Error **errp)
     }
     memory_region_add_subregion(get_system_memory(),
                                 VMBUS_MMIO_WINDOW_BASE, &s->mmio_vram);
+    s->mmio_vram_base = VMBUS_MMIO_WINDOW_BASE;
 
     qemu_edid_generate(s->edid, sizeof(s->edid), &s->edid_info);
 

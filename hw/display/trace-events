@@ -233,6 +233,7 @@ hv_synthvid_version_response(uint32_t version, uint8_t accepted) "version 0x%x i
 hv_synthvid_feature_change_sent(void) "requesting dirt, pointer and situation messages"
 hv_synthvid_vram_location(uint64_t gpa, uint8_t specified) "vram gpa 0x%" PRIx64 " specified %u"
 hv_synthvid_vram_map_failed(uint64_t gpa, uint64_t len) "vram gpa 0x%" PRIx64 " mapped len 0x%" PRIx64
+hv_synthvid_vram_relocate(uint64_t old_base, uint64_t new_base) "vram region moved 0x%" PRIx64 " -> 0x%" PRIx64
 hv_synthvid_situation_update(uint8_t active, uint32_t width, uint32_t height, uint32_t pitch, uint32_t offset, uint8_t depth) "active %u %ux%u pitch %u offset 0x%x depth %u"
 hv_synthvid_situation_extra_outputs(uint8_t count) "guest advertised %u outputs, using the first"
 hv_synthvid_situation_invalid(uint32_t width, uint32_t height, uint32_t pitch, uint32_t offset, uint8_t depth) "rejected situation %ux%u pitch %u offset 0x%x depth %u"
