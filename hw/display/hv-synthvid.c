@@ -800,14 +800,39 @@ static void synthvid_shape_complete(HvSynthVid *s)
         /*
          * The guest sends 0xAARRGGBB words, which is also the QEMUCursor
          * data format (see the SPICE alpha-cursor path in qxl-render.c
-         * and the channel masks in ui/sdl2.c).
+         * and the channel masks in ui/sdl2.c) -- but rows arrive
+         * bottom-up (DIB convention, as in RDP pointer PDUs): a
+         * top-down copy renders the Windows pointer upside-down.
          */
-        memcpy(c->data, s->shape_data, s->shape_expected);
+        uint32_t stride = s->shape_width * SYNTHVID_CURSOR_ARGB_PIXEL_SIZE;
+        uint8_t *dst = (uint8_t *)c->data;
+        uint32_t y;
+
+        for (y = 0; y < s->shape_height; y++) {
+            memcpy(dst + (size_t)y * stride,
+                   s->shape_data +
+                   (size_t)(s->shape_height - 1 - y) * stride,
+                   stride);
+        }
     } else {
         uint32_t bpl = DIV_ROUND_UP(s->shape_width, 8);
-        uint8_t *and_mask = s->shape_data;
-        uint8_t *xor_mask = s->shape_data + bpl * s->shape_height;
+        g_autofree uint8_t *and_mask = g_malloc(bpl * s->shape_height);
+        g_autofree uint8_t *xor_mask = g_malloc(bpl * s->shape_height);
+        uint32_t y;
 
+        /*
+         * AND mask plane followed by XOR mask plane, each bottom-up
+         * like the ARGB variant (inferred from the same convention;
+         * modern Windows sends ARGB shapes, so this path is untested).
+         */
+        for (y = 0; y < s->shape_height; y++) {
+            uint32_t src_y = s->shape_height - 1 - y;
+
+            memcpy(and_mask + y * bpl,
+                   s->shape_data + src_y * bpl, bpl);
+            memcpy(xor_mask + y * bpl,
+                   s->shape_data + (s->shape_height + src_y) * bpl, bpl);
+        }
         cursor_set_mono(c, 0xffffff, 0x000000, xor_mask, 1, and_mask);
     }
 
